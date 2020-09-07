@@ -39,16 +39,18 @@ var progName = filepath.Base(os.Args[0])
 var buildIamClient func() (iamiface.ClientAPI, error) = _buildIamClient
 
 func getAwsConfig() (cfg aws.Config, err error) {
-	stsSourceProfile := os.Getenv("AWS_STS_SOURCE_PROFILE")
-	if stsSourceProfile != "" {
-		cfg, err = external.LoadDefaultAWSConfig(
-			external.WithSharedConfigProfile(stsSourceProfile),
-		)
+	stsAssumeRoleArn := os.Getenv("AWS_STS_ASSUME_ROLE_ARN")
+	if stsAssumeRoleArn != "" {
+		var extraConfigs []external.Config
+		stsSourceProfile := os.Getenv("AWS_STS_SOURCE_PROFILE")
+		if stsSourceProfile != "" {
+			extraConfigs = []external.Config{external.WithSharedConfigProfile(stsSourceProfile)}
+		}
+		cfg, err = external.LoadDefaultAWSConfig(extraConfigs...)
 		if err != nil {
 			return
 		}
 		sts := sts.New(cfg)
-		stsAssumeRoleArn := os.Getenv("AWS_STS_ASSUME_ROLE_ARN")
 		cfg.Credentials = stscreds.NewAssumeRoleProvider(sts, stsAssumeRoleArn)
 	} else {
 		cfg, err = external.LoadDefaultAWSConfig()
