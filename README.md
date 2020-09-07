@@ -2,6 +2,16 @@
 
 This is a tiny program that retrieves registered SSH public keys for a specified IAM user and prints them to standard output.
 
+## Synopsis
+
+```
+$ openssh-iam-ssh-public-key -user [USER]
+```
+
+`-user` option can be omitted, and output the keys for all the users then.
+
+## Configuration
+
 In addition to the default AWS SDK configuration scheme, it supports STS credentials for a assumed role through the following environment variables:
 
 * `AWS_STS_SOURCE_PROFILE`
