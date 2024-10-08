@@ -28,32 +28,32 @@ import (
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/external"
-	"github.com/aws/aws-sdk-go-v2/aws/stscreds"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
-	"github.com/aws/aws-sdk-go-v2/service/iam/iamiface"
+	iam_types "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 var progName = filepath.Base(os.Args[0])
-var buildIamClient func() (iamiface.ClientAPI, error) = _buildIamClient
+var buildIamClient func(ctx context.Context) (*iam.Client, error) = _buildIamClient
 
-func getAwsConfig() (cfg aws.Config, err error) {
+func getAwsConfig(ctx context.Context) (cfg aws.Config, err error) {
 	stsAssumeRoleArn := os.Getenv("AWS_STS_ASSUME_ROLE_ARN")
 	if stsAssumeRoleArn != "" {
-		var extraConfigs []external.Config
+		var extraOptions []func(*config.LoadOptions) error
 		stsSourceProfile := os.Getenv("AWS_STS_SOURCE_PROFILE")
 		if stsSourceProfile != "" {
-			extraConfigs = []external.Config{external.WithSharedConfigProfile(stsSourceProfile)}
+			extraOptions = append(extraOptions, config.WithSharedConfigProfile(stsSourceProfile))
 		}
-		cfg, err = external.LoadDefaultAWSConfig(extraConfigs...)
+		cfg, err = config.LoadDefaultConfig(ctx, extraOptions...)
 		if err != nil {
 			return
 		}
-		sts := sts.New(cfg)
+		sts := sts.NewFromConfig(cfg)
 		cfg.Credentials = stscreds.NewAssumeRoleProvider(sts, stsAssumeRoleArn)
 	} else {
-		cfg, err = external.LoadDefaultAWSConfig()
+		cfg, err = config.LoadDefaultConfig(ctx)
 		if err != nil {
 			return
 		}
@@ -61,54 +61,49 @@ func getAwsConfig() (cfg aws.Config, err error) {
 	return
 }
 
-func _buildIamClient() (iamiface.ClientAPI, error) {
-	cfg, err := getAwsConfig()
+func _buildIamClient(ctx context.Context) (*iam.Client, error) {
+	cfg, err := getAwsConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return iam.New(cfg), nil
+	return iam.NewFromConfig(cfg), nil
 }
 
-func listUsers(ctx context.Context, client iamiface.ClientAPI, callback func([]iam.User) error) error {
+func listUsers(ctx context.Context, client *iam.Client, callback func([]iam_types.User) error) error {
 	var marker *string
 	for {
-		req := client.ListUsersRequest(
+		resp, err := client.ListUsers(
+			ctx,
 			&iam.ListUsersInput{
 				Marker: marker,
 			},
 		)
-		resp, err := req.Send(ctx)
-		if err != nil {
-			return err
-		}
 		err = callback(resp.Users)
 		if err != nil {
 			return err
 		}
-		if resp.IsTruncated != nil {
-			if !*resp.IsTruncated {
-				break
-			} else {
-				if resp.Marker == nil {
-					return fmt.Errorf("resp.IsTruncated is true, but no marker is given")
-				}
-				marker = resp.Marker
+		if !resp.IsTruncated {
+			break
+		} else {
+			if resp.Marker == nil {
+				return fmt.Errorf("resp.IsTruncated is true, but no marker is given")
 			}
+			marker = resp.Marker
 		}
 	}
 	return nil
 }
 
-func listSSHPublicKeys(ctx context.Context, client iamiface.ClientAPI, userName string, callback func([]iam.SSHPublicKeyMetadata) error) error {
+func listSSHPublicKeys(ctx context.Context, client *iam.Client, userName string, callback func([]iam_types.SSHPublicKeyMetadata) error) error {
 	var marker *string
 	for {
-		req := client.ListSSHPublicKeysRequest(
+		resp, err := client.ListSSHPublicKeys(
+			ctx,
 			&iam.ListSSHPublicKeysInput{
 				UserName: &userName,
 				Marker:   marker,
 			},
 		)
-		resp, err := req.Send(ctx)
 		if err != nil {
 			return err
 		}
@@ -116,28 +111,26 @@ func listSSHPublicKeys(ctx context.Context, client iamiface.ClientAPI, userName 
 		if err != nil {
 			return err
 		}
-		if resp.IsTruncated != nil {
-			if !*resp.IsTruncated {
-				break
-			} else {
-				if resp.Marker == nil {
-					return fmt.Errorf("resp.IsTruncated is true, but no marker is given")
-				}
-				marker = resp.Marker
+		if !resp.IsTruncated {
+			break
+		} else {
+			if resp.Marker == nil {
+				return fmt.Errorf("resp.IsTruncated is true, but no marker is given")
 			}
+			marker = resp.Marker
 		}
 	}
 	return nil
 }
 
-func listActiveSSHKeyIds(ctx context.Context, client iamiface.ClientAPI, userName string) ([]string, error) {
+func listActiveSSHKeyIds(ctx context.Context, client *iam.Client, userName string) ([]string, error) {
 	var keyIds []string
 	// list active keys
 	err := listSSHPublicKeys(
 		ctx, client, userName,
-		func(metadata []iam.SSHPublicKeyMetadata) error {
+		func(metadata []iam_types.SSHPublicKeyMetadata) error {
 			for _, m := range metadata {
-				if m.Status == iam.StatusTypeActive {
+				if m.Status == iam_types.StatusTypeActive {
 					keyIds = append(keyIds, *m.SSHPublicKeyId)
 				}
 			}
@@ -150,7 +143,7 @@ func listActiveSSHKeyIds(ctx context.Context, client iamiface.ClientAPI, userNam
 	return keyIds, nil
 }
 
-func mapKeyIdsToSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, parallelism int, userName string, keyIds []string) ([]string, error) {
+func mapKeyIdsToSshPublicKeys(ctx context.Context, client *iam.Client, parallelism int, userName string, keyIds []string) ([]string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// build a request
@@ -189,14 +182,14 @@ func mapKeyIdsToSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, pa
 		go func(keyId string) {
 			defer func() { <-sema }()
 			defer wg.Done()
-			req := client.GetSSHPublicKeyRequest(
+			out, err := client.GetSSHPublicKey(
+				ctx,
 				&iam.GetSSHPublicKeyInput{
-					Encoding:       iam.EncodingTypeSsh,
+					Encoding:       iam_types.EncodingTypeSsh,
 					UserName:       &userName,
 					SSHPublicKeyId: &keyId,
 				},
 			)
-			out, err := req.Send(ctx)
 			if err != nil {
 				errChan <- err
 			} else {
@@ -209,7 +202,7 @@ func mapKeyIdsToSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, pa
 	return sshKeys, lastError
 }
 
-func mapUsersToSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, parallelism int, userNames []string) ([]string, error) {
+func mapUsersToSshPublicKeys(ctx context.Context, client *iam.Client, parallelism int, userNames []string) ([]string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// build a request
@@ -261,7 +254,7 @@ func mapUsersToSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, par
 	return sshKeys, lastError
 }
 
-func getSshPublicKeysInner(ctx context.Context, client iamiface.ClientAPI, parallelism int, userName string) ([]string, error) {
+func getSshPublicKeysInner(ctx context.Context, client *iam.Client, parallelism int, userName string) ([]string, error) {
 	keyIds, err := listActiveSSHKeyIds(ctx, client, userName)
 	if err != nil {
 		return nil, err
@@ -269,10 +262,10 @@ func getSshPublicKeysInner(ctx context.Context, client iamiface.ClientAPI, paral
 	return mapKeyIdsToSshPublicKeys(ctx, client, parallelism, userName, keyIds)
 }
 
-func getSshPublicKeys(ctx context.Context, client iamiface.ClientAPI, parallelism int, userName string) ([]string, error) {
+func getSshPublicKeys(ctx context.Context, client *iam.Client, parallelism int, userName string) ([]string, error) {
 	if userName == "" {
 		var userNames []string
-		err := listUsers(ctx, client, func(users []iam.User) error {
+		err := listUsers(ctx, client, func(users []iam_types.User) error {
 			for _, user := range users {
 				userNames = append(userNames, *user.UserName)
 			}
@@ -302,7 +295,7 @@ func do(ctx context.Context) error {
 	}
 	flagParser.IntVar(&parallelism, "parallelism", 4, "paralellism")
 
-	client, err := buildIamClient()
+	client, err := buildIamClient(ctx)
 	if err != nil {
 		return err
 	}
